@@ -225,8 +225,6 @@ char * rq_compress(struct rq * rq, FILE ** file) {
 		z_stream strm;
 		unsigned char in[CHUNK], out[CHUNK];
 
-		printf("compress\n");
-
 		/* allocate deflate state */
 		strm.zalloc = Z_NULL;
 		strm.zfree = Z_NULL;
