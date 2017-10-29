@@ -17,9 +17,11 @@
 #include "client.h"
 
 struct webd_config * config;
+volatile int fd_server;
 
 void signal_handler(int signal) {
 	thread_list_clean();
+	close(fd_server);
 	config_free();
 	exit(0);
 }
@@ -33,12 +35,22 @@ int config_init(int argc, char * argv[]) {
 
 	config = malloc(sizeof(struct webd_config));
 	config->http_root = ".";
+	config->index_file = "index.html";
 	config->port = 80;
 	config->print_help = 0;
 
 	for(i = 1; i < argc; i++) {
 		if(strcmp(argv[i], "-?") == 0 || strcmp(argv[i], "--help") == 0) {
 			config->print_help = 1;
+		} else if(strcmp(argv[i], "-I") == 0 || strcmp(argv[i], "--index") == 0) {
+			if(i + 1 < argc) {
+				config->index_file = argv[i + 1];
+				i += 1;
+			} else {
+				fprintf(stderr, "Must provide filename after flag -I\n");
+				success = 0;
+				break;
+			}
 		} else if(strcmp(argv[i], "-r") == 0 || strcmp(argv[i], "--root") == 0) {
 			if(i + 1 < argc) {
 				config->http_root = argv[i + 1];
@@ -70,7 +82,7 @@ int config_init(int argc, char * argv[]) {
 }
 
 int main(int argc, char * argv[]) {
-	int fd_server, fd_client;
+	int fd_client;
 	struct sockaddr_in ep = {0};
 
 	if(config_init(argc, argv) == -1) {
@@ -80,9 +92,10 @@ int main(int argc, char * argv[]) {
 	if(config->print_help) {
 		printf("webd v1.0.0\n");
 		printf("Flags:\n");
-		printf("(-? | --help)      : Prints this info\n");
-		printf("(-p | --port) PORT : Specify port number\n");
-		printf("(-r | --root) DIR  : Specify root directory to serve files from\n");
+		printf("(-? | --help)           : Prints this info\n");
+		printf("(-p | --port) PORT      : Specify port number\n");
+		printf("(-r | --root) DIR       : Specify root directory to serve files from\n");
+		printf("(-I | --index) FILENAME : Specify default index filename to use\n");
 		goto exit_0;
 	}
 	if(signal(SIGINT, signal_handler) == SIG_ERR ||

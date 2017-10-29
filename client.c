@@ -9,6 +9,9 @@
 #include <netdb.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
+
+#include <zlib.h>
 
 #include "webd.h"
 #include "threadlist.h"
@@ -22,9 +25,15 @@ volatile int line_number = 0;
 void rq_free(struct rq * rq) {
 	if(rq->path) {
 		free(rq->path);
+		rq->path = NULL;
 	}
 	if(rq->syspath) {
 		free(rq->syspath);
+		rq->syspath = NULL;
+	}
+	if(rq->read_buf) {
+		free(rq->read_buf);
+		rq->read_buf = NULL;
 	}
 
 	free(rq);
@@ -121,14 +130,27 @@ int rq_is_hdr(char * header_name, char * line, char ** rest) {
 	return result;
 }
 
-int rq_200(struct rq * rq, int socket_fd, FILE * file, char * mimetype, int length) {
-	char * buffer = malloc(length + 2), * response =
-		"HTTP/%d.%d 200 OK\r\n"
-		"Content-Type: %s\r\n"
-		"Content-Length: %d\r\n"
-		"\r\n";
+int rq_200(struct rq * rq, int socket_fd, FILE * file, char * mimetype, int length, char * encoding) {
+	char * buffer = malloc(length + 2);
 	size_t read_size = fread(buffer, 1, length + 2, file);
-	dprintf(socket_fd, response, rq->pv_maj, rq->pv_min, mimetype, read_size);
+	if(encoding) {
+		char * response =
+			"HTTP/%d.%d 200 OK\r\n"
+			"Content-Type: %s\r\n"
+			"Content-Length: %d\r\n"
+			"content-Encoding: %s\r\n"
+			"Connection: close\r\n"
+			"\r\n";
+		dprintf(socket_fd, response, rq->pv_maj, rq->pv_min, mimetype, read_size, encoding);
+	} else {
+		char * response =
+			"HTTP/%d.%d 200 OK\r\n"
+			"Content-Type: %s\r\n"
+			"Content-Length: %d\r\n"
+			"Connection: close\r\n"
+			"\r\n";
+		dprintf(socket_fd, response, rq->pv_maj, rq->pv_min, mimetype, read_size);
+	}
 	send(socket_fd, buffer, read_size, MSG_NOSIGNAL);
 	free(buffer);
 
@@ -142,6 +164,21 @@ int rq_404(struct rq * rq, int socket_fd, char * msg) {
 		"HTTP/%d.%d 404 Not Found\r\n"
 		"Content-Type: text/plain\r\n"
 		"Content-Length: %d\r\n"
+		"Connection: close\r\n"
+		"\r\n%s";
+	dprintf(socket_fd, response, rq->pv_maj, rq->pv_min, strlen(msg), msg);
+
+	close(socket_fd);
+
+	return 0;
+}
+
+int rq_500(struct rq * rq, int socket_fd, char * msg) {
+	char * response =
+		"HTTP/%d.%d 500 Internal Server Error\r\n"
+		"Content-Type: text/plain\r\n"
+		"Content-Length: %d\r\n"
+		"Connection: close\r\n"
 		"\r\n%s";
 	dprintf(socket_fd, response, rq->pv_maj, rq->pv_min, strlen(msg), msg);
 
@@ -167,27 +204,111 @@ char * rq_mime_type(char * path) {
 	return "application/octet-stream";
 }
 
+int is_directory(char * path) {
+	if(str_ends_with(path, "/")) {
+		return 1;
+	} else {
+		struct stat stat_info;
+		if(stat(path, &stat_info) != 0) {
+			return 0;
+		} else {
+			return S_ISDIR(stat_info.st_mode);
+		}
+	}
+}
+
+char * rq_compress(struct rq * rq, FILE ** file) {
+	const int CHUNK = 1 << 16;
+	FILE * source = *file;
+	if((rq->supported_compression & RQ_COMP_DEFLATE) == RQ_COMP_DEFLATE) {
+		int flush, have;
+		z_stream strm;
+		unsigned char in[CHUNK], out[CHUNK];
+
+		printf("compress\n");
+
+		/* allocate deflate state */
+		strm.zalloc = Z_NULL;
+		strm.zfree = Z_NULL;
+		strm.opaque = Z_NULL;
+		if(deflateInit(&strm, Z_DEFAULT_COMPRESSION) != Z_OK)
+			goto err_0;
+
+		*file = tmpfile();
+
+		do {
+			strm.avail_in = fread(in, 1, CHUNK, source);
+			if (ferror(source)) {
+				deflateEnd(&strm);
+				goto err_1;
+			}
+			flush = feof(source) ? Z_FINISH : Z_NO_FLUSH;
+			strm.next_in = in;
+			
+			do {
+				strm.avail_out = CHUNK;
+				strm.next_out = out;
+				deflate(&strm, flush);
+
+				have = CHUNK - strm.avail_out;
+				if (fwrite(out, 1, have, *file) != have || ferror(*file)) {
+					deflateEnd(&strm);
+					goto err_1;
+				}
+			} while(strm.avail_out == 0);
+		} while(flush != Z_FINISH);
+
+		deflateEnd(&strm);
+		fclose(source);
+		return "deflate";
+err_1:
+		fclose(*file);
+		rewind(source);
+		*file = source;
+err_0:
+		return NULL;
+	} else {
+		return NULL;
+	}
+}
+
 int rq_handle(struct rq * rq, int socket_fd) {
 	int result = 0;
 	
 	if(rq->syspath) {
-		char * fname = calloc(strlen(config->http_root) + strlen(rq->syspath) + 1, 1);
-		strcpy(fname, config->http_root);
-		strcat(fname, rq->syspath);
+		char * path_rel = calloc(strlen(config->http_root) + strlen(rq->syspath) + 1, sizeof(char)), * path_abs, * server_error = NULL;
+		strcpy(path_rel, config->http_root);
+		strcat(path_rel, rq->syspath);
+		if((path_abs = realpath(path_rel, NULL)) == NULL) {
+			server_error = strerror(errno);
+		} else {
+			if(is_directory(path_abs)) {
+				int append_slash = !str_ends_with(path_abs, "/");
+				path_abs = realloc(path_abs, strlen(path_abs) + strlen(config->index_file) + (append_slash ? 1 : 0) + 1);
+				if(append_slash) {
+					strcat(path_abs, "/");
+				}
+				strcat(path_abs, config->index_file);
+			}
+		}
+		free(path_rel);
 
-		if(access(fname, F_OK) != -1) {
-			FILE * f = fopen(fname, "r");
+		if(server_error) {
+			result |= rq_500(rq, socket_fd, server_error);
+		} else if(access(path_abs, F_OK) != -1) {
+			FILE * f = fopen(path_abs, "r");
+			char * encoding = rq_compress(rq, &f);
 			int file_len;
 			fseek(f, 0L, SEEK_END);
 			file_len = ftell(f);
 			rewind(f);
-			result |= rq_200(rq, socket_fd, f, rq_mime_type(rq->syspath), file_len);
+			result |= rq_200(rq, socket_fd, f, rq_mime_type(path_abs), file_len, encoding);
 			fclose(f);
 		} else {
 			result |= rq_404(rq, socket_fd, "File not found");
 		}
 
-		free(fname);
+		free(path_abs);
 	} else {
 		result |= rq_404(rq, socket_fd, "Illegal directory traversal in path");
 	}
@@ -215,8 +336,8 @@ int rq_line(struct rq * rq, char * line, int socket_fd) {
 		char * rest = line;
 
 		if(rq_is_hdr("Accept-Encoding", rest, &rest)) {
-			if(strtok(rest, "gzip")) rq->supported_compression |= RQ_COMP_GZ;
-			if(strtok(rest, "deflate")) rq->supported_compression |= RQ_COMP_DEFLATE;
+			if(strstr(rest, "gzip") != NULL) rq->supported_compression |= RQ_COMP_GZ;
+			if(strstr(rest, "deflate") != NULL) rq->supported_compression |= RQ_COMP_DEFLATE;
 		}
 
 		return 0;
@@ -257,15 +378,15 @@ void * thread_client(void * arg) {
 
 		if(line_index + 1 >= line_size) {
 			line_size += 256;
-			t->read_buf = realloc(t->read_buf, line_size);
+			rq->read_buf = realloc(rq->read_buf, line_size);
 		}
 
-		t->read_buf[line_index++] = c;
+		rq->read_buf[line_index++] = c;
 
-		if(c == '\n' && line_index >= 2 && t->read_buf[line_index - 2] == '\r') {
+		if(c == '\n' && line_index >= 2 && rq->read_buf[line_index - 2] == '\r') {
 			int result;
-			t->read_buf[line_index] = '\0';
-			result = rq_line(rq, t->read_buf, t->socket_fd);
+			rq->read_buf[line_index] = '\0';
+			result = rq_line(rq, rq->read_buf, t->socket_fd);
 			
 			if((result & ST_ERR) == ST_ERR) {
 				success = 0;
@@ -282,8 +403,6 @@ void * thread_client(void * arg) {
 		
 		index += 1;
 	}
-	free(t->read_buf);
-	t->read_buf = NULL;
 
 	rq_free(rq);
 	t->data = NULL;

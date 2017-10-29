@@ -3,6 +3,7 @@
 
 struct webd_config {
 	char * http_root;
+	char * index_file;
 	uint16_t port;
 	int print_help;
 };

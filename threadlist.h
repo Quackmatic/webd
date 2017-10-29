@@ -7,7 +7,6 @@ typedef void (*thread_cleanup)(void *);
 struct thread_list {
 	pthread_t thread;
 	struct thread_list * next;
-	char * read_buf;
 	void * data;
 	thread_cleanup cleanup;
 	int socket_fd, thread_running;

@@ -16,7 +16,6 @@ int thread_list_create(int socket_fd, void * (*start_routine)(void *)) {
 	list->next = thread_list;
 	list->cleanup = NULL;
 	list->data = NULL;
-	list->read_buf = NULL;
 	thread_list = list;
 	if(pthread_create(&list->thread, NULL, start_routine, list) < 0) {
 		perror("Could not create thread");
@@ -55,10 +54,6 @@ int thread_list_kill(struct thread_list * list) {
 		list->thread_running = 0;
 		close(list->socket_fd);
 		pthread_join(list->thread, &thread_return);
-	}
-	if(list->read_buf) {
-		free(list->read_buf);
-		list->read_buf = NULL;
 	}
 	return return_value;
 }
