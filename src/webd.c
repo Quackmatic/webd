@@ -11,6 +11,7 @@
 #include <netdb.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 
 #include "webd.h"
 #include "threadlist.h"
@@ -38,9 +39,12 @@ int config_init(int argc, char * argv[]) {
 	config->index_file = "index.html";
 	config->port = 80;
 	config->print_help = 0;
+	config->daemon = 0;
 
 	for(i = 1; i < argc; i++) {
-		if(strcmp(argv[i], "-?") == 0 || strcmp(argv[i], "--help") == 0) {
+		if(strcmp(argv[i], "-D") == 0 || strcmp(argv[i], "--daemon") == 0) {
+			config->daemon = 1;
+		} else if(strcmp(argv[i], "--help") == 0) {
 			config->print_help = 1;
 		} else if(strcmp(argv[i], "-I") == 0 || strcmp(argv[i], "--index") == 0) {
 			if(i + 1 < argc) {
@@ -81,6 +85,35 @@ int config_init(int argc, char * argv[]) {
 	return success ? 0 : -1;
 }
 
+void daemon_init() {
+	int fd;
+	pid_t pid;
+
+	pid = fork();
+	if(pid < 0) {
+		exit(1);
+	} else if(pid > 0) {
+		exit(0);
+	}
+
+	if(setsid() < 0) {
+		exit(1);
+	}
+
+	pid = fork();
+	if(pid < 0) {
+		exit(1);
+	} else if(pid > 0) {
+		exit(0);
+	}
+
+	umask(0);
+
+	for(fd = sysconf(_SC_OPEN_MAX); fd >= 0; fd--) {
+		close(fd);
+	}
+}
+
 int main(int argc, char * argv[]) {
 	int fd_client;
 	struct sockaddr_in ep = {0};
@@ -92,14 +125,20 @@ int main(int argc, char * argv[]) {
 	if(config->print_help) {
 		printf("webd v1.0.0\n");
 		printf("Flags:\n");
-		printf("(-? | --help)           : Prints this info\n");
+		printf("--help                  : Prints this info\n");
+		printf("(-D | --daemon)         : Run server as daemon\n");
 		printf("(-p | --port) PORT      : Specify port number\n");
 		printf("(-r | --root) DIR       : Specify root directory to serve files from\n");
 		printf("(-I | --index) FILENAME : Specify default index filename to use\n");
 		goto exit_0;
 	}
+
+	if(config->daemon) {
+		daemon_init();
+	}
+
 	if(signal(SIGINT, signal_handler) == SIG_ERR ||
- 			  signal(SIGTERM, signal_handler) == SIG_ERR) {
+ 	   signal(SIGTERM, signal_handler) == SIG_ERR) {
  		fprintf(stderr, "Cannot register signal handler\n");
 		goto exit_0;
 	}
@@ -137,5 +176,5 @@ exit_1:
 exit_0:
 	thread_list_clean();
 	config_free();
-	return 0;
+	return 1;
 }
