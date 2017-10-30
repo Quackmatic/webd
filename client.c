@@ -96,7 +96,7 @@ int rq_parse_path(struct rq * rq, char * line, char ** rest) {
 
 				if(c == '?') {
 					break;
-				} else if(c == '/' && i >= 2 && line[i - 2] == '.' && line[i - 1] == '.') {
+				} else if(c == '.' && i >= 2 && line[i - 2] == '/' && line[i - 1] == '.') {
 					j = -1;
 					break;
 				}
