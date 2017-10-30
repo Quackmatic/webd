@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <time.h>
 
 #include <netdb.h>
 #include <netinet/in.h>
@@ -48,6 +49,12 @@ int rq_parse_method(struct rq * rq, char * line, char ** rest) {
 		if(**rest == ' ') {
 			if(*rest - line == 3 && strncmp(line, "GET", 3) == 0) {
 				rq->method = RQ_METHOD_GET;
+			} else if(*rest - line == 4 && strncmp(line, "POST", 4) == 0) {
+				rq->method = RQ_METHOD_POST;
+			} else if(*rest - line == 4 && strncmp(line, "HEAD", 4) == 0) {
+				rq->method = RQ_METHOD_HEAD;
+			} else if(*rest - line == 7 && strncmp(line, "OPTIONS", 7) == 0) {
+				rq->method = RQ_METHOD_OPTIONS;
 			} else {
 				rq->method = RQ_METHOD_UNSUPPORTED;
 			}
@@ -130,60 +137,49 @@ int rq_is_hdr(char * header_name, char * line, char ** rest) {
 	return result;
 }
 
+void rq_write_date(int socket_fd) {
+	char date[64];
+	time_t now = time(0);
+	strftime(date, sizeof(date), "%a, %d %b %Y %H:%M:%S %Z", gmtime(&now));
+	dprintf(socket_fd, "Date: %s\n", date);
+}
+
 int rq_200(struct rq * rq, int socket_fd, FILE * file, char * mimetype, int length, char * encoding) {
-	char * buffer = malloc(length + 2);
-	size_t read_size = fread(buffer, 1, length + 2, file);
-	if(encoding) {
-		char * response =
-			"HTTP/%d.%d 200 OK\r\n"
-			"Content-Type: %s\r\n"
-			"Content-Length: %d\r\n"
-			"content-Encoding: %s\r\n"
-			"Connection: close\r\n"
-			"\r\n";
-		dprintf(socket_fd, response, rq->pv_maj, rq->pv_min, mimetype, read_size, encoding);
+	dprintf(socket_fd, "HTTP/%d.%d 200 OK\r\n", rq->pv_maj, rq->pv_min);
+	rq_write_date(socket_fd);
+	dprintf(socket_fd, "Connection: Close\r\n");
+	dprintf(socket_fd, "Content-Length: %d\r\n", length);
+	if(rq->method == RQ_METHOD_OPTIONS) {
+		dprintf(socket_fd, "Allow: GET, POST, HEAD, OPTIONS\r\n");
+		dprintf(socket_fd, "\r\n");
 	} else {
-		char * response =
-			"HTTP/%d.%d 200 OK\r\n"
-			"Content-Type: %s\r\n"
-			"Content-Length: %d\r\n"
-			"Connection: close\r\n"
-			"\r\n";
-		dprintf(socket_fd, response, rq->pv_maj, rq->pv_min, mimetype, read_size);
+		dprintf(socket_fd, "Content-Type: %s\r\n", mimetype);
+		if(encoding != NULL)
+			dprintf(socket_fd, "Content-Encoding: %s\r\n", encoding);
+		dprintf(socket_fd, "\r\n");
+
+		if(rq->method != RQ_METHOD_HEAD) {
+			int read;
+			const int buf_size = 4096;
+			char buffer[buf_size];
+
+			while((read = fread(buffer, 1, buf_size, file)) > 0) {
+				send(socket_fd, buffer, read, MSG_NOSIGNAL);
+			}
+		}
 	}
-	send(socket_fd, buffer, read_size, MSG_NOSIGNAL);
-	free(buffer);
-
 	close(socket_fd);
-
 	return 0;
 }
 
-int rq_404(struct rq * rq, int socket_fd, char * msg) {
-	char * response =
-		"HTTP/%d.%d 404 Not Found\r\n"
-		"Content-Type: text/plain\r\n"
-		"Content-Length: %d\r\n"
-		"Connection: close\r\n"
-		"\r\n%s";
-	dprintf(socket_fd, response, rq->pv_maj, rq->pv_min, strlen(msg), msg);
-
+int rq_xxx(struct rq * rq, int socket_fd, char * method, char * msg) {
+	dprintf(socket_fd, "HTTP/%d.%d %s\r\n", rq->pv_maj, rq->pv_min, method);
+	rq_write_date(socket_fd);
+	dprintf(socket_fd, "Connection: Close\r\n");
+	dprintf(socket_fd, "Content-Type: text/plain\r\n");
+	dprintf(socket_fd, "Content-Length: %d\r\n", (int)strlen(msg));
+	dprintf(socket_fd, "\r\n%s", msg);
 	close(socket_fd);
-
-	return 0;
-}
-
-int rq_500(struct rq * rq, int socket_fd, char * msg) {
-	char * response =
-		"HTTP/%d.%d 500 Internal Server Error\r\n"
-		"Content-Type: text/plain\r\n"
-		"Content-Length: %d\r\n"
-		"Connection: close\r\n"
-		"\r\n%s";
-	dprintf(socket_fd, response, rq->pv_maj, rq->pv_min, strlen(msg), msg);
-
-	close(socket_fd);
-
 	return 0;
 }
 
@@ -237,7 +233,6 @@ char * rq_compress(struct rq * rq, FILE ** file) {
 		do {
 			strm.avail_in = fread(in, 1, CHUNK, source);
 			if (ferror(source)) {
-				deflateEnd(&strm);
 				goto err_1;
 			}
 			flush = feof(source) ? Z_FINISH : Z_NO_FLUSH;
@@ -250,7 +245,6 @@ char * rq_compress(struct rq * rq, FILE ** file) {
 
 				have = CHUNK - strm.avail_out;
 				if (fwrite(out, 1, have, *file) != have || ferror(*file)) {
-					deflateEnd(&strm);
 					goto err_1;
 				}
 			} while(strm.avail_out == 0);
@@ -260,6 +254,7 @@ char * rq_compress(struct rq * rq, FILE ** file) {
 		fclose(source);
 		return "deflate";
 err_1:
+		deflateEnd(&strm);
 		fclose(*file);
 		rewind(source);
 		*file = source;
@@ -273,42 +268,48 @@ err_0:
 int rq_handle(struct rq * rq, int socket_fd) {
 	int result = 0;
 	
-	if(rq->syspath) {
-		char * path_rel = calloc(strlen(config->http_root) + strlen(rq->syspath) + 1, sizeof(char)), * path_abs, * server_error = NULL;
-		strcpy(path_rel, config->http_root);
-		strcat(path_rel, rq->syspath);
-		if((path_abs = realpath(path_rel, NULL)) == NULL) {
-			server_error = strerror(errno);
-		} else {
-			if(is_directory(path_abs)) {
-				int append_slash = !str_ends_with(path_abs, "/");
-				path_abs = realloc(path_abs, strlen(path_abs) + strlen(config->index_file) + (append_slash ? 1 : 0) + 1);
-				if(append_slash) {
-					strcat(path_abs, "/");
-				}
-				strcat(path_abs, config->index_file);
-			}
-		}
-		free(path_rel);
-
-		if(server_error) {
-			result |= rq_500(rq, socket_fd, server_error);
-		} else if(access(path_abs, F_OK) != -1) {
-			FILE * f = fopen(path_abs, "r");
-			char * encoding = rq_compress(rq, &f);
-			int file_len;
-			fseek(f, 0L, SEEK_END);
-			file_len = ftell(f);
-			rewind(f);
-			result |= rq_200(rq, socket_fd, f, rq_mime_type(path_abs), file_len, encoding);
-			fclose(f);
-		} else {
-			result |= rq_404(rq, socket_fd, "File not found");
-		}
-
-		free(path_abs);
+	if(rq->method == RQ_METHOD_OPTIONS) {
+		result |= rq_200(rq, socket_fd, NULL, NULL, 0, NULL);
+	} else if(rq->method == RQ_METHOD_UNSUPPORTED) {
+		result |= rq_xxx(rq, socket_fd, "405 Method Not Allowed", "Method not allowed");
 	} else {
-		result |= rq_404(rq, socket_fd, "Illegal directory traversal in path");
+		if(rq->syspath) {
+			char * path_rel = calloc(strlen(config->http_root) + strlen(rq->syspath) + 1, sizeof(char)), * path_abs, * server_error = NULL;
+			strcpy(path_rel, config->http_root);
+			strcat(path_rel, rq->syspath);
+			if((path_abs = realpath(path_rel, NULL)) == NULL) {
+				server_error = strerror(errno);
+			} else {
+				if(is_directory(path_abs)) {
+					int append_slash = !str_ends_with(path_abs, "/");
+					path_abs = realloc(path_abs, strlen(path_abs) + strlen(config->index_file) + (append_slash ? 1 : 0) + 1);
+					if(append_slash) {
+						strcat(path_abs, "/");
+					}
+					strcat(path_abs, config->index_file);
+				}
+			}
+			free(path_rel);
+
+			if(server_error) {
+				result |= rq_xxx(rq, socket_fd, "500 Internal Server Error", server_error);
+			} else if(access(path_abs, F_OK) != -1) {
+				FILE * f = fopen(path_abs, "r");
+				char * encoding = rq_compress(rq, &f);
+				int file_len;
+				fseek(f, 0L, SEEK_END);
+				file_len = ftell(f);
+				rewind(f);
+				result |= rq_200(rq, socket_fd, f, rq_mime_type(path_abs), file_len, encoding);
+				fclose(f);
+			} else {
+				result |= rq_xxx(rq, socket_fd, "404 Not Found", "File not found");
+			}
+
+			free(path_abs);
+		} else {
+			result |= rq_xxx(rq, socket_fd, "400 Bad Request", "Illegal directory traversal in path");
+		}
 	}
 	result |= ST_DONE;
 

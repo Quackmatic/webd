@@ -5,6 +5,9 @@
 
 enum rq_method {
 	RQ_METHOD_GET,
+	RQ_METHOD_POST,
+	RQ_METHOD_OPTIONS,
+	RQ_METHOD_HEAD,
 	RQ_METHOD_UNSUPPORTED
 };
 
@@ -26,9 +29,9 @@ void rq_thread_cleanup(void * data);
 int rq_parse_method(struct rq * rq, char * line, char ** rest);
 int rq_parse_path(struct rq * rq, char * line, char ** rest);
 int rq_is_hdr(char * header_name, char * line, char ** rest);
+void rq_write_date(int socket_fd);
 int rq_200(struct rq * rq, int socket_fd, FILE * file, char * mimetype, int length, char * encoding);
-int rq_404(struct rq * rq, int socket_fd, char * msg);
-int rq_500(struct rq * rq, int socket_fd, char * msg);
+int rq_xxx(struct rq * rq, int socket_fd, char * method, char * msg);
 int str_ends_with(char * str, char * end);
 char * rq_mime_type(char * path);
 int is_directory(char * path);
