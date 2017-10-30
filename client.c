@@ -18,8 +18,8 @@
 #include "threadlist.h"
 #include "client.h"
 
-#define ST_DONE 1
-#define ST_ERR -1
+#define ST_DONE 1 << 1
+#define ST_ERR 1 << 4
 
 volatile int line_number = 0;
 
