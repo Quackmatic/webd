@@ -1,3 +1,5 @@
 vgcore.*
 *.o
+*.odt
+*.odt#
 webd
